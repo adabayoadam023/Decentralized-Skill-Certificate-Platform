@@ -9,6 +9,10 @@
 (define-constant err-not-certificate-owner (err u105))
 (define-constant err-instructor-not-registered (err u106))
 
+(define-constant err-self-endorsement (err u107))
+(define-constant err-already-endorsed (err u108))
+(define-constant err-endorsement-limit (err u109))
+
 (define-data-var last-certificate-id uint u0)
 
 (define-map certificates
@@ -271,6 +275,91 @@
 (define-read-only (is-instructor-verified (instructor principal))
   (match (map-get? instructors instructor)
     instructor-data (ok (get verified instructor-data))
+    (ok false)
+  )
+)
+
+(define-map certificate-endorsements
+  uint
+  (list 10 { endorser: principal, endorsement-date: uint, credibility-score: uint })
+)
+
+(define-map endorser-reputation
+  principal
+  { total-endorsements: uint, reputation-score: uint }
+)
+
+(define-public (endorse-certificate (certificate-id uint) (credibility-score uint))
+  (let
+    (
+      (endorser tx-sender)
+      (current-block stacks-block-height)
+      (endorsement-entry { endorser: endorser, endorsement-date: current-block, credibility-score: credibility-score })
+    )
+    (match (map-get? certificates certificate-id)
+      cert-data
+        (begin
+          (asserts! (not (is-eq endorser (get issuer cert-data))) err-self-endorsement)
+          (match (map-get? instructors endorser)
+            instructor-data
+              (begin
+                (asserts! (get verified instructor-data) err-not-authorized)
+                (asserts! (<= credibility-score u100) err-not-authorized)
+                (let
+                  (
+                    (existing-endorsements (default-to (list) (map-get? certificate-endorsements certificate-id)))
+                    (already-endorsed (is-some (index-of (map get-endorser existing-endorsements) endorser)))
+                  )
+                  (asserts! (not already-endorsed) err-already-endorsed)
+                  (asserts! (< (len existing-endorsements) u10) err-endorsement-limit)
+                  (map-set certificate-endorsements certificate-id
+                    (unwrap-panic (as-max-len? (append existing-endorsements endorsement-entry) u10))
+                  )
+                  (map-set endorser-reputation endorser
+                    (match (map-get? endorser-reputation endorser)
+                      existing-rep (merge existing-rep { total-endorsements: (+ (get total-endorsements existing-rep) u1) })
+                      { total-endorsements: u1, reputation-score: u50 }
+                    )
+                  )
+                  (ok true)
+                )
+              )
+            err-instructor-not-registered
+          )
+        )
+      err-certificate-not-found
+    )
+  )
+)
+
+(define-private (get-endorser (endorsement { endorser: principal, endorsement-date: uint, credibility-score: uint }))
+  (get endorser endorsement)
+)
+
+(define-read-only (get-certificate-endorsements (certificate-id uint))
+  (ok (map-get? certificate-endorsements certificate-id))
+)
+
+(define-read-only (get-endorser-reputation (endorser principal))
+  (ok (map-get? endorser-reputation endorser))
+)
+
+(define-read-only (get-certificate-credibility-score (certificate-id uint))
+  (match (map-get? certificate-endorsements certificate-id)
+    endorsements
+      (ok (fold + (map get-credibility-score endorsements) u0))
+    (ok u0)
+  )
+)
+
+(define-private (get-credibility-score (endorsement { endorser: principal, endorsement-date: uint, credibility-score: uint }))
+  (get credibility-score endorsement)
+)
+
+(define-read-only (is-certificate-endorsed-by (certificate-id uint) (endorser principal))
+  (match (map-get? certificate-endorsements certificate-id)
+    endorsements
+      (ok (is-some (index-of (map get-endorser endorsements) endorser)))
     (ok false)
   )
 )
