@@ -13,6 +13,11 @@
 (define-constant err-already-endorsed (err u108))
 (define-constant err-endorsement-limit (err u109))
 
+(define-constant err-prerequisites-not-met (err u110))
+(define-constant err-pathway-not-found (err u111))
+(define-constant err-invalid-pathway (err u112))
+
+
 (define-data-var last-certificate-id uint u0)
 
 (define-map certificates
@@ -361,5 +366,116 @@
     endorsements
       (ok (is-some (index-of (map get-endorser endorsements) endorser)))
     (ok false)
+  )
+)
+
+(define-map skill-pathways
+  (string-ascii 100)
+  {
+    prerequisites: (list 5 (string-ascii 100)),
+    unlocks: (list 10 (string-ascii 100)),
+    pathway-level: uint,
+    estimated-duration: uint
+  }
+)
+
+(define-map student-skill-progress
+  principal
+  (list 20 (string-ascii 100))
+)
+
+(define-public (create-skill-pathway 
+  (skill-name (string-ascii 100))
+  (prerequisites (list 5 (string-ascii 100)))
+  (unlocks (list 10 (string-ascii 100)))
+  (pathway-level uint)
+  (estimated-duration uint)
+)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= pathway-level u10) err-invalid-pathway)
+    (map-set skill-pathways skill-name
+      {
+        prerequisites: prerequisites,
+        unlocks: unlocks,
+        pathway-level: pathway-level,
+        estimated-duration: estimated-duration
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-private (has-prerequisite-skills (student principal) (required-skills (list 5 (string-ascii 100))))
+  (let
+    (
+      (student-skills (default-to (list) (map-get? student-skill-progress student)))
+    )
+    (fold check-skill-acquired required-skills true)
+  )
+)
+
+(define-private (check-skill-acquired (skill (string-ascii 100)) (acc bool))
+  (if acc
+    (is-some (index-of (default-to (list) (map-get? student-skill-progress tx-sender)) skill))
+    false
+  )
+)
+
+(define-public (validate-pathway-prerequisites (recipient principal) (skill-name (string-ascii 100)))
+  (match (map-get? skill-pathways skill-name)
+    pathway-data
+      (if (has-prerequisite-skills recipient (get prerequisites pathway-data))
+        (ok true)
+        err-prerequisites-not-met
+      )
+    (ok true)
+  )
+)
+
+(define-private (update-student-progress (student principal) (skill-name (string-ascii 100)))
+  (let
+    (
+      (current-skills (default-to (list) (map-get? student-skill-progress student)))
+      (skill-exists (is-some (index-of current-skills skill-name)))
+    )
+    (if (not skill-exists)
+      (map-set student-skill-progress student
+        (unwrap-panic (as-max-len? (append current-skills skill-name) u20))
+      )
+      true
+    )
+  )
+)
+
+(define-read-only (get-skill-pathway (skill-name (string-ascii 100)))
+  (ok (map-get? skill-pathways skill-name))
+)
+
+(define-read-only (get-student-progress (student principal))
+  (ok (map-get? student-skill-progress student))
+)
+
+(define-read-only (get-available-next-skills (student principal))
+  (let
+    (
+      (student-skills (default-to (list) (map-get? student-skill-progress student)))
+    )
+    (ok (fold collect-unlocked-skills student-skills (list)))
+  )
+)
+
+(define-private (collect-unlocked-skills (skill (string-ascii 100)) (acc (list 50 (string-ascii 100))))
+  (match (map-get? skill-pathways skill)
+    pathway-data
+      (fold append-if-not-exists (get unlocks pathway-data) acc)
+    acc
+  )
+)
+
+(define-private (append-if-not-exists (skill (string-ascii 100)) (acc (list 50 (string-ascii 100))))
+  (if (is-none (index-of acc skill))
+    (unwrap-panic (as-max-len? (append acc skill) u50))
+    acc
   )
 )
