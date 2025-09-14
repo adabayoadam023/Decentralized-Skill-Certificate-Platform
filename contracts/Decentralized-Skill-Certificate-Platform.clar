@@ -17,6 +17,14 @@
 (define-constant err-pathway-not-found (err u111))
 (define-constant err-invalid-pathway (err u112))
 
+(define-constant err-certificate-staked (err u113))
+(define-constant err-certificate-not-staked (err u114))
+(define-constant err-staking-period-not-complete (err u115))
+(define-constant err-insufficient-rewards (err u116))
+
+(define-data-var reward-pool uint u1000000)
+(define-data-var base-reward-rate uint u100)
+
 
 (define-data-var last-certificate-id uint u0)
 
@@ -477,5 +485,159 @@
   (if (is-none (index-of acc skill))
     (unwrap-panic (as-max-len? (append acc skill) u50))
     acc
+  )
+)
+
+
+(define-map certificate-stakes
+  uint
+  {
+    staker: principal,
+    stake-start: uint,
+    stake-duration: uint,
+    reward-rate: uint,
+    rewards-earned: uint
+  }
+)
+
+(define-map staker-stats
+  principal
+  {
+    total-staked: uint,
+    total-rewards-earned: uint,
+    active-stakes: uint
+  }
+)
+
+(define-public (stake-certificate (certificate-id uint) (duration uint))
+  (let
+    (
+      (staker tx-sender)
+      (current-block stacks-block-height)
+    )
+    (match (map-get? certificates certificate-id)
+      cert-data
+        (begin
+          (asserts! (is-eq staker (get recipient cert-data)) err-not-certificate-owner)
+          (asserts! (is-none (map-get? certificate-stakes certificate-id)) err-certificate-staked)
+          (asserts! (>= duration u144) err-not-authorized)
+          (asserts! (<= duration u52560) err-not-authorized)
+          (let
+            (
+              (credibility (unwrap-panic (get-certificate-credibility-score certificate-id)))
+              (reward-rate (calculate-reward-rate cert-data credibility duration))
+            )
+            (map-set certificate-stakes certificate-id
+              {
+                staker: staker,
+                stake-start: current-block,
+                stake-duration: duration,
+                reward-rate: reward-rate,
+                rewards-earned: u0
+              }
+            )
+            (map-set staker-stats staker
+              (match (map-get? staker-stats staker)
+                existing-stats (merge existing-stats 
+                  { 
+                    total-staked: (+ (get total-staked existing-stats) u1),
+                    active-stakes: (+ (get active-stakes existing-stats) u1)
+                  })
+                { total-staked: u1, total-rewards-earned: u0, active-stakes: u1 }
+              )
+            )
+            (ok true)
+          )
+        )
+      err-certificate-not-found
+    )
+  )
+)
+
+(define-public (unstake-certificate (certificate-id uint))
+  (let
+    (
+      (staker tx-sender)
+      (current-block stacks-block-height)
+    )
+    (match (map-get? certificate-stakes certificate-id)
+      stake-data
+        (begin
+          (asserts! (is-eq staker (get staker stake-data)) err-not-authorized)
+          (asserts! (>= current-block (+ (get stake-start stake-data) (get stake-duration stake-data))) err-staking-period-not-complete)
+          (let
+            (
+              (rewards (calculate-earned-rewards stake-data))
+              (current-pool (var-get reward-pool))
+            )
+            (asserts! (>= current-pool rewards) err-insufficient-rewards)
+            (map-delete certificate-stakes certificate-id)
+            (var-set reward-pool (- current-pool rewards))
+            (map-set staker-stats staker
+              (match (map-get? staker-stats staker)
+                existing-stats (merge existing-stats
+                  {
+                    total-rewards-earned: (+ (get total-rewards-earned existing-stats) rewards),
+                    active-stakes: (- (get active-stakes existing-stats) u1)
+                  })
+                { total-staked: u0, total-rewards-earned: rewards, active-stakes: u0 }
+              )
+            )
+            (try! (as-contract (stx-transfer? rewards tx-sender staker)))
+            (ok rewards)
+          )
+        )
+      err-certificate-not-staked
+    )
+  )
+)
+
+(define-private (calculate-reward-rate (cert-data {skill-name: (string-ascii 100), description: (string-ascii 500), issuer: principal, recipient: principal, issued-at: uint, expiry-date: (optional uint), skill-level: (string-ascii 20), institution: (string-ascii 100), verification-hash: (buff 32)}) (credibility uint) (duration uint))
+  (let
+    (
+      (base-rate (var-get base-reward-rate))
+      (credibility-bonus (/ (* credibility u50) u100))
+      (duration-bonus (/ duration u1000))
+    )
+    (+ base-rate credibility-bonus duration-bonus)
+  )
+)
+
+(define-private (calculate-earned-rewards (stake-data {staker: principal, stake-start: uint, stake-duration: uint, reward-rate: uint, rewards-earned: uint}))
+  (/ (* (get reward-rate stake-data) (get stake-duration stake-data)) u100)
+)
+
+(define-public (fund-reward-pool (amount uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (var-set reward-pool (+ (var-get reward-pool) amount))
+    (ok true)
+  )
+)
+
+(define-read-only (get-certificate-stake (certificate-id uint))
+  (ok (map-get? certificate-stakes certificate-id))
+)
+
+(define-read-only (get-staker-stats (staker principal))
+  (ok (map-get? staker-stats staker))
+)
+
+(define-read-only (get-reward-pool)
+  (ok (var-get reward-pool))
+)
+
+(define-read-only (estimate-rewards (certificate-id uint) (duration uint))
+  (match (map-get? certificates certificate-id)
+    cert-data
+      (let
+        (
+          (credibility (unwrap-panic (get-certificate-credibility-score certificate-id)))
+          (reward-rate (calculate-reward-rate cert-data credibility duration))
+        )
+        (ok (/ (* reward-rate duration) u100))
+      )
+    err-certificate-not-found
   )
 )
