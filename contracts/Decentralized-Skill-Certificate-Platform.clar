@@ -22,6 +22,10 @@
 (define-constant err-staking-period-not-complete (err u115))
 (define-constant err-insufficient-rewards (err u116))
 
+(define-constant err-badge-already-claimed (err u117))
+(define-constant err-badge-requirements-not-met (err u118))
+(define-constant err-badge-not-found (err u119))
+
 (define-data-var reward-pool uint u1000000)
 (define-data-var base-reward-rate uint u100)
 
@@ -639,5 +643,143 @@
         (ok (/ (* reward-rate duration) u100))
       )
     err-certificate-not-found
+  )
+)
+
+
+(define-map badge-definitions
+  (string-ascii 50)
+  {
+    description: (string-ascii 200),
+    requirement-type: (string-ascii 30),
+    threshold: uint,
+    badge-level: uint
+  }
+)
+
+(define-map student-badges
+  principal
+  (list 15 { badge-name: (string-ascii 50), earned-at: uint })
+)
+
+(define-private (count-certificates-by-skill (student principal) (skill-name (string-ascii 100)))
+  (let
+    (
+      (cert-ids (default-to (list) (map-get? student-certificates student)))
+    )
+    (fold count-matching-skill cert-ids { skill: skill-name, count: u0 })
+  )
+)
+
+(define-private (count-matching-skill (cert-id uint) (context { skill: (string-ascii 100), count: uint }))
+  (match (map-get? certificates cert-id)
+    cert-data
+      (if (is-eq (get skill-name cert-data) (get skill context))
+        { skill: (get skill context), count: (+ (get count context) u1) }
+        context
+      )
+    context
+  )
+)
+
+(define-private (count-unique-institutions (student principal))
+  (let
+    (
+      (cert-ids (default-to (list) (map-get? student-certificates student)))
+    )
+    (len (fold collect-unique-institutions cert-ids (list)))
+  )
+)
+
+(define-private (collect-unique-institutions (cert-id uint) (acc (list 20 (string-ascii 100))))
+  (match (map-get? certificates cert-id)
+    cert-data
+      (if (is-none (index-of acc (get institution cert-data)))
+        (unwrap-panic (as-max-len? (append acc (get institution cert-data)) u20))
+        acc
+      )
+    acc
+  )
+)
+
+(define-public (claim-badge (badge-name (string-ascii 50)) (skill-filter (optional (string-ascii 100))))
+  (let
+    (
+      (claimer tx-sender)
+      (current-block stacks-block-height)
+      (existing-badges (default-to (list) (map-get? student-badges claimer)))
+    )
+    (match (map-get? badge-definitions badge-name)
+      badge-def
+        (begin
+          (asserts! (is-none (index-of (map get-badge-name existing-badges) badge-name)) err-badge-already-claimed)
+          (asserts! (meets-badge-requirements claimer badge-def skill-filter) err-badge-requirements-not-met)
+          (map-set student-badges claimer
+            (unwrap-panic (as-max-len? 
+              (append existing-badges { badge-name: badge-name, earned-at: current-block })
+              u15
+            ))
+          )
+          (ok true)
+        )
+      err-badge-not-found
+    )
+  )
+)
+
+(define-private (meets-badge-requirements 
+  (student principal) 
+  (badge-def { description: (string-ascii 200), requirement-type: (string-ascii 30), threshold: uint, badge-level: uint })
+  (skill-filter (optional (string-ascii 100)))
+)
+  (if (is-eq (get requirement-type badge-def) "skill-mastery")
+    (match skill-filter
+      skill (>= (get count (count-certificates-by-skill student skill)) (get threshold badge-def))
+      false
+    )
+    (if (is-eq (get requirement-type badge-def) "institution-diversity")
+      (>= (count-unique-institutions student) (get threshold badge-def))
+      false
+    )
+  )
+)
+
+(define-private (get-badge-name (badge-entry { badge-name: (string-ascii 50), earned-at: uint }))
+  (get badge-name badge-entry)
+)
+
+(define-public (create-badge 
+  (badge-name (string-ascii 50))
+  (description (string-ascii 200))
+  (requirement-type (string-ascii 30))
+  (threshold uint)
+  (badge-level uint)
+)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (map-set badge-definitions badge-name
+      {
+        description: description,
+        requirement-type: requirement-type,
+        threshold: threshold,
+        badge-level: badge-level
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-student-badges (student principal))
+  (ok (map-get? student-badges student))
+)
+
+(define-read-only (get-badge-definition (badge-name (string-ascii 50)))
+  (ok (map-get? badge-definitions badge-name))
+)
+
+(define-read-only (has-badge (student principal) (badge-name (string-ascii 50)))
+  (match (map-get? student-badges student)
+    badges (ok (is-some (index-of (map get-badge-name badges) badge-name)))
+    (ok false)
   )
 )
