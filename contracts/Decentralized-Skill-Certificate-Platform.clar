@@ -26,6 +26,11 @@
 (define-constant err-badge-requirements-not-met (err u118))
 (define-constant err-badge-not-found (err u119))
 
+(define-constant err-dispute-already-exists (err u120))
+(define-constant err-dispute-not-found (err u121))
+(define-constant err-already-voted (err u122))
+(define-constant err-cannot-dispute-own (err u123))
+
 (define-data-var reward-pool uint u1000000)
 (define-data-var base-reward-rate uint u100)
 
@@ -780,6 +785,117 @@
 (define-read-only (has-badge (student principal) (badge-name (string-ascii 50)))
   (match (map-get? student-badges student)
     badges (ok (is-some (index-of (map get-badge-name badges) badge-name)))
+    (ok false)
+  )
+)
+
+
+(define-map certificate-disputes
+  uint
+  {
+    disputer: principal,
+    reason: (string-ascii 200),
+    created-at: uint,
+    vote-count: uint,
+    resolved: bool,
+    flagged: bool
+  }
+)
+
+(define-map dispute-votes
+  { certificate-id: uint, voter: principal }
+  { vote-type: bool, voted-at: uint }
+)
+
+(define-public (create-dispute (certificate-id uint) (reason (string-ascii 200)))
+  (let
+    (
+      (disputer tx-sender)
+      (current-block stacks-block-height)
+    )
+    (match (map-get? certificates certificate-id)
+      cert-data
+        (begin
+          (asserts! (not (is-eq disputer (get recipient cert-data))) err-cannot-dispute-own)
+          (asserts! (not (is-eq disputer (get issuer cert-data))) err-cannot-dispute-own)
+          (asserts! (is-none (map-get? certificate-disputes certificate-id)) err-dispute-already-exists)
+          (map-set certificate-disputes certificate-id
+            {
+              disputer: disputer,
+              reason: reason,
+              created-at: current-block,
+              vote-count: u0,
+              resolved: false,
+              flagged: false
+            }
+          )
+          (ok true)
+        )
+      err-certificate-not-found
+    )
+  )
+)
+
+(define-public (vote-on-dispute (certificate-id uint) (support-dispute bool))
+  (let
+    (
+      (voter tx-sender)
+      (current-block stacks-block-height)
+      (vote-key { certificate-id: certificate-id, voter: voter })
+    )
+    (match (map-get? instructors voter)
+      instructor-data
+        (begin
+          (asserts! (get verified instructor-data) err-not-authorized)
+          (match (map-get? certificate-disputes certificate-id)
+            dispute-data
+              (begin
+                (asserts! (not (get resolved dispute-data)) err-not-authorized)
+                (asserts! (is-none (map-get? dispute-votes vote-key)) err-already-voted)
+                (map-set dispute-votes vote-key
+                  {
+                    vote-type: support-dispute,
+                    voted-at: current-block
+                  }
+                )
+                (if support-dispute
+                  (let
+                    (
+                      (new-vote-count (+ (get vote-count dispute-data) u1))
+                      (should-flag (>= new-vote-count u3))
+                    )
+                    (map-set certificate-disputes certificate-id
+                      (merge dispute-data
+                        {
+                          vote-count: new-vote-count,
+                          flagged: should-flag
+                        }
+                      )
+                    )
+                    (ok should-flag)
+                  )
+                  (ok false)
+                )
+              )
+            err-dispute-not-found
+          )
+        )
+      err-instructor-not-registered
+    )
+  )
+)
+
+(define-read-only (get-certificate-dispute (certificate-id uint))
+  (ok (map-get? certificate-disputes certificate-id))
+)
+
+(define-read-only (get-dispute-vote (certificate-id uint) (voter principal))
+  (ok (map-get? dispute-votes { certificate-id: certificate-id, voter: voter }))
+)
+
+(define-read-only (is-certificate-flagged (certificate-id uint))
+  (match (map-get? certificate-disputes certificate-id)
+    dispute-data (ok (get flagged dispute-data))
     (ok false)
   )
 )
